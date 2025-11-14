@@ -1,0 +1,9 @@
+# Never upload environment secrets
+backend/.env
+*.env
+
+# Node modules should not be uploaded
+backend/node_modules/
+
+# Logs
+*.log

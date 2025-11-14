@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Fake News Detector</title>
+
+  <style>
+    :root{
+      --bg:#0f1724; --card:#0b1220; --muted:#9aa4b2;
+      --accent:#7c3aed; --good:#16a34a; --bad:#ef4444; --meh:#f59e0b;
+      --glass: rgba(255,255,255,0.03);
+      --radius:14px; --pad:16px;
+      color-scheme: dark;
+    }
+    html,body{height:100%; margin:0; font-family:Inter,ui-sans-serif,system-ui,Roboto,"Helvetica Neue"; background:linear-gradient(180deg,#071021,#061220); color:#e6eef8}
+    .wrap{max-width:900px;margin:30px auto;padding:20px;}
+    .card{background:var(--card); border-radius:14px; padding:20px; box-shadow:0 4px 25px rgba(0,0,0,.6); border:1px solid rgba(255,255,255,0.03)}
+    textarea{width:100%;min-height:170px;padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,0.08);background:var(--glass);color:inherit;resize:vertical;font-size:14px}
+    input{padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.08);background:var(--glass);color:inherit}
+    button{background:var(--accent);color:white;border:0;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:600}
+    button.ghost{background:transparent;border:1px solid rgba(255,255,255,0.05)}
+    h1{margin:0 0 8px;font-size:22px}
+    .small{color:var(--muted);font-size:13px}
+    .result{margin-top:16px;padding:15px;border-radius:12px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.03)}
+    .verdict{display:inline-flex;align-items:center;gap:12px;font-weight:700;padding:12px 16px;border-radius:10px}
+    .dot{width:12px;height:12px;border-radius:50%}
+    .raw{white-space:pre-wrap;font-family:monospace;background:#061d2b;padding:10px;border-radius:8px;font-size:13px;margin-top:10px}
+    .hidden{display:none}
+    .spinner{border:3px solid rgba(255,255,255,0.1); border-left-color:var(--accent); width:18px;height:18px;border-radius:50%; animation:spin .8s linear infinite; display:inline-block}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    hr{border:none;border-top:1px solid rgba(255,255,255,0.08);margin:25px 0}
+  </style>
+</head>
+
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>Fake News Detector</h1>
+    <p class="small">Paste any claim or headline and see if it's real, fake, mixed, or uncertain.</p>
+
+    <textarea id="input" placeholder="Paste text here..."></textarea>
+
+    <div style="margin-top:12px; display:flex; flex-wrap:wrap; gap:12px; align-items:center">
+      <div>
+        <div class="small">Backend URL:</div>
+        <input id="backendUrl" type="text" value="http://localhost:4000" style="width:260px">
+      </div>
+      <div>
+        <div class="small">x-api-key (optional): 123456</div>
+        <input id="clientKey" type="text" placeholder="client API key">
+      </div>
+      <button id="sample" class="ghost">Sample</button>
+      <button id="check">Check</button>
+    </div>
+
+    <div id="out" class="result hidden"></div>
+
+    <button id="copyResult" class="ghost hidden" style="margin-top:12px">Copy Result</button>
+
+    <hr>
+
+    <!-- ============ REVIEWS ============ -->
+    <h2 style="font-size:18px;margin:0 0 8px">Reviews</h2>
+
+    <div class="small" style="margin-bottom:8px">Share your thoughts about this tool.</div>
+
+    <input id="reviewName" type="text" placeholder="Your name (optional)" style="width:100%;max-width:300px;margin-bottom:8px">
+    <textarea id="reviewComment" placeholder="Write your review..." style="min-height:80px"></textarea>
+
+    <div style="display:flex; gap:10px; align-items:center; margin-top:8px">
+      <button id="postReview" class="ghost">Post Review</button>
+      <button id="refreshReviews" class="ghost">Refresh</button>
+      <div id="reviewStatus" class="small" style="margin-left:auto"></div>
+    </div>
+
+    <div id="reviewsList" style="margin-top:16px">
+      <div class="small">Loading reviews...</div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  const inputEl = document.getElementById("input");
+  const backendEl = document.getElementById("backendUrl");
+  const keyEl = document.getElementById("clientKey");
+  const outEl = document.getElementById("out");
+  const checkBtn = document.getElementById("check");
+  const sampleBtn = document.getElementById("sample");
+  const copyBtn = document.getElementById("copyResult");
+
+  // Reviews
+  const reviewsListEl = document.getElementById("reviewsList");
+  const reviewNameEl = document.getElementById("reviewName");
+  const reviewCommentEl = document.getElementById("reviewComment");
+  const postReviewBtn = document.getElementById("postReview");
+  const refreshReviewsBtn = document.getElementById("refreshReviews");
+  const reviewStatusEl = document.getElementById("reviewStatus");
+
+  function escapeHtml(s){
+    return String(s || "").replace(/[&<>"]/g, c => (
+      {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]
+    ));
+  }
+  function verdictColor(v){
+    v = v?.toUpperCase();
+    if(v==="REAL") return "#16a34a";
+    if(v==="FAKE") return "#ef4444";
+    if(v==="MIXED") return "#f59e0b";
+    return "#475569";
+  }
+  function showOut(html){
+    outEl.innerHTML = html;
+    outEl.classList.remove("hidden");
+  }
+  function hideOut(){
+    outEl.classList.add("hidden");
+    outEl.innerHTML = "";
+    copyBtn.classList.add("hidden");
+  }
+
+  // ================= CHECK =================
+  async function doCheck(){
+    const text = inputEl.value.trim();
+    if(!text){ alert("Enter some text first"); return; }
+
+    showOut('<div class="small"><span class="spinner"></span> Checking...</div>');
+
+    const backend = backendEl.value.replace(/\/+$/, "");
+    const headers = {"Content-Type":"application/json"};
+    if(keyEl.value.trim()) headers["x-api-key"] = keyEl.value.trim();
+
+    try{
+      const r = await fetch(backend + "/api/check", {
+        method:"POST",
+        headers,
+        body: JSON.stringify({text})
+      });
+
+      let rawText = null;
+      try{ rawText = await r.text(); } catch{}
+
+      if(!r.ok){
+        showOut(`<div style="color:#fca5a5"><strong>Error:</strong> ${escapeHtml(rawText || "Server error")}</div>`);
+        return;
+      }
+
+      const data = JSON.parse(rawText);
+
+      if(data.error){
+        showOut(`<div style="color:#fca5a5">${escapeHtml(data.error)}</div>
+        ${data.raw ? `<pre class="raw">${escapeHtml(data.raw)}</pre>`:''}`);
+        return;
+      }
+
+      const color = verdictColor(data.verdict);
+      const html = `
+        <div class="verdict" style="background:${color}33; border:1px solid ${color}55;">
+          <div class="dot" style="background:${color}"></div>
+          ${data.verdict.toUpperCase()} — ${data.confidence}% confidence
+        </div>
+        <div style="margin-top:12px">${escapeHtml(data.explanation)}</div>
+        <div style="margin-top:12px"><strong>Sources</strong><ul>
+          ${(data.sources||[]).map(s=>`<li>${escapeHtml(s)}</li>`).join("")}
+        </ul></div>
+      `;
+
+      showOut(html);
+
+      copyBtn.classList.remove("hidden");
+      copyBtn.onclick = ()=>{
+        navigator.clipboard.writeText(JSON.stringify(data,null,2));
+        copyBtn.textContent="Copied!";
+        setTimeout(()=>copyBtn.textContent="Copy Result",1200);
+      };
+
+    } catch(e){
+      showOut(`<div style="color:#fca5a5"><strong>Error:</strong> ${escapeHtml(e.message)}</div>`);
+    }
+  }
+
+  checkBtn.onclick = doCheck;
+
+  sampleBtn.onclick = ()=>{
+    inputEl.value = "Government to ban smartphones nationwide from next month.";
+  };
+
+  // ================= REVIEWS ======================
+  async function fetchReviews(){
+    const backend = backendEl.value.replace(/\/+$/, "");
+    try{
+      const r = await fetch(backend + "/api/reviews?limit=30");
+      const data = await r.json();
+      renderReviews(data.reviews);
+    } catch{
+      reviewsListEl.innerHTML = '<div class="small">Error loading reviews</div>';
+    }
+  }
+
+  function renderReviews(list){
+    if(!list.length){
+      reviewsListEl.innerHTML = '<div class="small">No reviews yet.</div>';
+      return;
+    }
+
+    reviewsListEl.innerHTML = list.map(r=>`
+      <div style="padding:10px;border:1px solid rgba(255,255,255,0.05);border-radius:10px;margin-bottom:8px">
+        <div style="font-weight:700">${escapeHtml(r.name)}</div>
+        <div class="small" style="margin-bottom:6px">${new Date(r.createdAt).toLocaleString()}</div>
+        <div>${escapeHtml(r.comment)}</div>
+      </div>
+    `).join("");
+  }
+
+  async function postReview(){
+    const name = reviewNameEl.value.trim() || "Anonymous";
+    const comment = reviewCommentEl.value.trim();
+    if(comment.length < 3){
+      reviewStatusEl.textContent = "Comment too short";
+      return;
+    }
+
+    postReviewBtn.disabled = true;
+    reviewStatusEl.textContent = "Posting...";
+
+    const backend = backendEl.value.replace(/\/+$/, "");
+    const headers = {"Content-Type":"application/json"};
+    if(keyEl.value.trim()) headers["x-api-key"] = keyEl.value.trim();
+
+    try{
+      const r = await fetch(backend + "/api/reviews", {
+        method:"POST",
+        headers,
+        body: JSON.stringify({name,comment})
+      });
+
+      const data = await r.json();
+
+      if(!r.ok){
+        reviewStatusEl.textContent = data.error || "Error";
+        postReviewBtn.disabled = false;
+        return;
+      }
+
+      reviewStatusEl.textContent = "Posted!";
+      reviewCommentEl.value="";
+      setTimeout(()=>reviewStatusEl.textContent="",1500);
+
+      fetchReviews();
+
+    } catch(e){
+      reviewStatusEl.textContent = "Network error";
+    }
+
+    postReviewBtn.disabled=false;
+  }
+
+  postReviewBtn.onclick = postReview;
+  refreshReviewsBtn.onclick = fetchReviews;
+
+  // Load on page start
+  fetchReviews();
+</script>
+
+</body>
+</html>
