@@ -1,7 +1,6 @@
 // backend/server.js
 // Full upgraded live-news backend for Fake News Detector
 // Dependencies (install in backend/): express cors body-parser dotenv helmet express-rate-limit node-cache express-validator ajv groq-sdk node-fetch
-// npm install express cors body-parser dotenv helmet express-rate-limit node-cache express-validator ajv groq-sdk node-fetch
 
 const express = require('express');
 const cors = require('cors');
@@ -24,7 +23,6 @@ let fetchFn = (typeof fetch !== 'undefined') ? fetch : null;
 if (!fetchFn) {
   try {
     const nf = require('node-fetch');
-    // node-fetch v3 is ESM in some installs and exposes default; this handles both
     fetchFn = nf && (nf.default || nf);
   } catch (e) {
     console.warn('node-fetch not installed or failed to load. Install node-fetch@2 for CommonJS compatibility:', e && e.message ? e.message : e);
@@ -58,13 +56,10 @@ const groq = new Groq({ apiKey: GROQ_API_KEY });
 const frontendPath = path.join(__dirname, '..', 'frontend');
 if (fs.existsSync(path.join(frontendPath, 'index.html'))) {
   app.use(express.static(frontendPath));
-  // for SPA fallback
   // SPA fallback - serve index.html for any non-/api route
-// Use a regex route to avoid path-to-regexp '*' parsing errors.
-app.get(/^\/(?!api).*/, (req, res) => {
-  res.sendFile(path.join(frontendPath, 'index.html'));
-});
-
+  app.get(/^\/(?!api).*/, (req, res) => {
+    res.sendFile(path.join(frontendPath, 'index.html'));
+  });
 }
 
 // =========================
@@ -216,6 +211,7 @@ app.post('/api/check', requireClientKey, validateCheckInput, async (req, res) =>
     ).join('\n\n');
   }
 
+  // Prompt now instructs the model to return an integer confidence 0..100
   const prompt = `
 You are a precise fact-checker. FOLLOW THESE RULES:
 
@@ -223,7 +219,7 @@ You are a precise fact-checker. FOLLOW THESE RULES:
 2) Use EXACT JSON schema:
 {
   "verdict": "REAL|FAKE|MIXED|UNSURE",
-  "confidence": number,
+  "confidence": integer,         // MUST be an integer between 0 and 100 (no decimals, no percent sign)
   "explanation": "short text",
   "sources": ["..."]
 }
@@ -231,7 +227,7 @@ You are a precise fact-checker. FOLLOW THESE RULES:
 SEARCH_RESULTS:
 ${searchResultsText}
 
-Now analyze the Text below and output exactly one JSON object that follows the schema above. Keep explanation short.
+Now analyze the Text below and output exactly one JSON object that follows the schema above. Make SURE "confidence" is an integer between 0 and 100 (no decimals, no percent sign). Keep explanation short.
 """${userText}"""
 `;
 
@@ -275,6 +271,50 @@ Now analyze the Text below and output exactly one JSON object that follows the s
 
     if (!parsed) {
       return res.status(502).json({ error: 'Invalid JSON from model', raw });
+    }
+
+    // ------------------------
+    // Normalise confidence to an integer 0..100 (defensive)
+    // ------------------------
+    try {
+      if (parsed && parsed.confidence !== undefined && parsed.confidence !== null) {
+        let c = parsed.confidence;
+
+        // if string like "90" or "90%" or "0.9"
+        if (typeof c === 'string') {
+          c = c.replace('%', '').trim();
+          // sometimes model returns "0.9" in string form
+          const asNum = Number(c);
+          if (!Number.isNaN(asNum)) c = asNum;
+        }
+
+        if (typeof c === 'number' && !Number.isNaN(c)) {
+          if (c > 0 && c <= 1) {
+            // model returned 0.9 meaning 90% — convert to percent
+            c = Math.round(c * 100);
+          } else {
+            // could be 89.7 -> round to nearest integer
+            c = Math.round(c);
+          }
+        }
+
+        // final sanity check
+        if (typeof c !== 'number' || Number.isNaN(c)) {
+          return res.status(502).json({ error: 'Invalid confidence value from model', raw });
+        }
+
+        // clamp to 0..100
+        if (c < 0) c = 0;
+        if (c > 100) c = 100;
+
+        parsed.confidence = c;
+      } else {
+        // If confidence missing, set a sensible default (optional)
+        // parsed.confidence = 50;
+      }
+    } catch (err) {
+      console.error('Confidence normalization failed', err);
+      return res.status(502).json({ error: 'Failed to normalise model confidence', raw });
     }
 
     // Validate against schema
