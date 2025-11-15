@@ -44,7 +44,7 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 const NEWSAPI_KEY = process.env.NEWSAPI_KEY || '';
 const CLIENT_API_KEYS = (process.env.CLIENT_API_KEYS || '').split(',').map(s => s.trim()).filter(Boolean);
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || '';
 
 if (!GROQ_API_KEY) console.warn('⚠️ GROQ_API_KEY not set in .env — model calls will fail without it');
