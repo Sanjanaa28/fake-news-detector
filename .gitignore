@@ -1,9 +1,7 @@
-# Never upload environment secrets
-backend/.env
-*.env
-
-# Node modules should not be uploaded
-backend/node_modules/
-
-# Logs
-*.log
+/node_modules
+/backend/node_modules
+/frontend/node_modules
+/backend/.env
+reviews.json
+.DS_Store
+npm-debug.log

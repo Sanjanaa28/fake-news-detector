@@ -19,15 +19,16 @@ const path = require('path');
 // Groq SDK
 const Groq = require('groq-sdk');
 
-// node-fetch for Node < 18 fallback
-let fetchFn;
-if (typeof fetch !== 'undefined') {
-  fetchFn = fetch;
-} else {
+// Resilient fetch: prefer global fetch (Node 18+), then try node-fetch (v2 or v3), else null
+let fetchFn = (typeof fetch !== 'undefined') ? fetch : null;
+if (!fetchFn) {
   try {
-    fetchFn = require('node-fetch');
+    const nf = require('node-fetch');
+    // node-fetch v3 is ESM in some installs and exposes default; this handles both
+    fetchFn = nf && (nf.default || nf);
   } catch (e) {
-    console.warn('node-fetch not installed; install it if your Node version < 18 and you want NewsAPI support');
+    console.warn('node-fetch not installed or failed to load. Install node-fetch@2 for CommonJS compatibility:', e && e.message ? e.message : e);
+    fetchFn = null;
   }
 }
 
@@ -44,11 +45,27 @@ const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 const NEWSAPI_KEY = process.env.NEWSAPI_KEY || '';
 const CLIENT_API_KEYS = (process.env.CLIENT_API_KEYS || '').split(',').map(s => s.trim()).filter(Boolean);
 const PORT = process.env.PORT || 4000;
+const FRONTEND_URL = process.env.FRONTEND_URL || '';
 
 if (!GROQ_API_KEY) console.warn('⚠️ GROQ_API_KEY not set in .env — model calls will fail without it');
 if (!NEWSAPI_KEY) console.warn('ℹ️ NEWSAPI_KEY not set — evidence lookup will be disabled (model will fallback to general knowledge)');
 
 const groq = new Groq({ apiKey: GROQ_API_KEY });
+
+// =========================
+// Serve static frontend if present
+// =========================
+const frontendPath = path.join(__dirname, '..', 'frontend');
+if (fs.existsSync(path.join(frontendPath, 'index.html'))) {
+  app.use(express.static(frontendPath));
+  // for SPA fallback
+  // SPA fallback - serve index.html for any non-/api route
+// Use a regex route to avoid path-to-regexp '*' parsing errors.
+app.get(/^\/(?!api).*/, (req, res) => {
+  res.sendFile(path.join(frontendPath, 'index.html'));
+});
+
+}
 
 // =========================
 // Utilities: cache, files
@@ -68,7 +85,6 @@ function ensureReviewsFile() {
 }
 ensureReviewsFile();
 
-// safe read/write reviews
 function readReviews() {
   try {
     const raw = fs.readFileSync(REVIEWS_FILE, 'utf8');
@@ -137,7 +153,7 @@ async function fetchNewsSnippetsCached(query) {
   const cached = cache.get(cacheKey);
   if (cached) return cached;
 
-  if (!NEWSAPI_KEY) {
+  if (!NEWSAPI_KEY || !fetchFn) {
     cache.set(cacheKey, [] , 60); // cache empty for short time
     return [];
   }
@@ -172,14 +188,13 @@ async function fetchNewsSnippetsCached(query) {
 // Health endpoint
 // =========================
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, time: new Date().toISOString(), env: { hasNewsKey: Boolean(NEWSAPI_KEY) } });
+  res.json({ ok: true, time: new Date().toISOString(), env: { hasNewsKey: Boolean(NEWSAPI_KEY), hasGroqKey: Boolean(GROQ_API_KEY) } });
 });
 
 // =========================
 // Main fact-check endpoint
 // =========================
 app.post('/api/check', requireClientKey, validateCheckInput, async (req, res) => {
-  // Input validation
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ error: 'Invalid input', details: errors.array() });
 
@@ -201,7 +216,6 @@ app.post('/api/check', requireClientKey, validateCheckInput, async (req, res) =>
     ).join('\n\n');
   }
 
-  // Build a strict prompt that requires JSON output and instructs use of SEARCH_RESULTS
   const prompt = `
 You are a precise fact-checker. FOLLOW THESE RULES:
 
@@ -209,17 +223,10 @@ You are a precise fact-checker. FOLLOW THESE RULES:
 2) Use EXACT JSON schema:
 {
   "verdict": "REAL|FAKE|MIXED|UNSURE",
-  "confidence": number,       // integer 0-100
-  "explanation": "short text", // 1-3 sentences
-  "sources": ["..."]          // array of source URLs or short citations
+  "confidence": number,
+  "explanation": "short text",
+  "sources": ["..."]
 }
-
-3) Decision rules:
- - If SEARCH_RESULTS contains 2+ independent mainstream reports that confirm the claim, return REAL (confidence 60-100) and include those source URLs.
- - If SEARCH_RESULTS contains explicit debunking or authoritative refutation, return FAKE and cite them.
- - If results are mixed, return MIXED and explain the disagreement.
- - If no reliable evidence is found, you may use general knowledge to give a low-confidence best-effort guess (confidence <= 30).
- - If you cannot make a judgment, return UNSURE with confidence <= 10.
 
 SEARCH_RESULTS:
 ${searchResultsText}
@@ -287,7 +294,6 @@ Now analyze the Text below and output exactly one JSON object that follows the s
 
   } catch (err) {
     console.error('=== Groq Call Error ===', err?.message || err);
-    // show helpful guidance for decommissioned models or API errors
     if (err?.response?.data?.error?.code === 'model_decommissioned') {
       return res.status(502).json({
         error: 'Model decommissioned',
@@ -315,14 +321,12 @@ app.post('/api/reviews',
     body('comment').isString().trim().isLength({ min: 3, max: 500 }).escape()
   ],
   (req, res) => {
-    // require API key for posting if CLIENT_API_KEYS configured
     if (CLIENT_API_KEYS.length) {
       const key = (req.headers['x-api-key'] || '').trim();
       if (!key) return res.status(401).json({ error: 'x-api-key header required' });
       if (!CLIENT_API_KEYS.includes(key)) return res.status(403).json({ error: 'Invalid API key' });
     }
 
-    // debug log to help debugging
     console.log('Incoming review POST body:', req.body);
 
     const errors = validationResult(req);
